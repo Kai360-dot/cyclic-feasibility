@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from scipy.stats import qmc
 
-__all__ = ["generate_sobol_points", "Surrogate", "fit_mlp", "cross_validate", "select_width"]
+__all__ = ["generate_sobol_points", "Surrogate", "fit_mlp", "cross_validate", "select_width", "hausdorff"]
 
 
 # ---------------------------------------------------------------------------
@@ -144,3 +144,37 @@ def select_width(X, Y, *, start: int = 4, tol: float = 0.05, k: int = 5, verbose
             break
         width *= 2
     return min(table, key=table.get), table
+
+def eucl_dist(x, y):
+    """Compute the euclidian distance"""
+    assert x.ndim == 1 and y.ndim == 1
+    assert x.shape == y.shape
+    return np.sqrt(((x - y)**2).sum())
+
+def get_sup_d_x_Y(X, Y):
+    """Get the largest distance among any point in x to their closest neighbor in Y"""
+    largest = -1
+    for x in X:
+        cmin = np.inf # current closest
+        for y in Y:
+            dist = eucl_dist(x, y)
+            if dist < cmin:
+                xcand = dict(x=x, y=y) 
+            cmin = min(cmin, dist)
+        if cmin > largest: # update
+            cand = xcand
+        largest = max(largest, cmin)
+    return largest, cand
+
+def get_sup_d_y_X(X, Y):
+    return get_sup_d_x_Y(Y, X)
+
+def hausdorff(X, Y, verbose: bool = True):
+    """Uses euclidian distance"""
+    assert len(X) > 0 and len(Y) > 0
+    a, a_cand = get_sup_d_x_Y(X, Y)
+    b, b_cand = get_sup_d_y_X(X, Y)
+    pair = a_cand if a > b else b_cand
+    if verbose:
+        print(f"Hausdorff distance between: {pair['x']} and {pair['y']}")
+    return max(a, b)
