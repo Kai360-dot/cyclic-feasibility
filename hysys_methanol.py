@@ -26,13 +26,25 @@ __all__ = ["cache_objects", "run_point"]
 RECYCLE_SENSITIVITY = 0.1
 
 
-def cache_objects(case) -> dict:
+def set_segments(reactor, segments: int) -> None:
+    """Set the PFR's number of integration segments and verify it took."""
+    segments = int(segments)
+    if segments < 1:
+        raise ValueError(f"segments must be positive, got {segments}")
+    reactor.NumberOfSegments = segments
+    if int(reactor.NumberOfSegments) != segments:
+        raise RuntimeError(f"{reactor.Name}: NumberOfSegments is {reactor.NumberOfSegments}, wanted {segments}")
+
+
+def cache_objects(case, *, segments: int) -> dict:
     """
     Look up streams, unit operations and cells used by `run_point` once per
-    session, then tighten the recycle tolerance to `RECYCLE_SENSITIVITY`.
+    session, tighten the recycle tolerance to `RECYCLE_SENSITIVITY` and set the
+    PFR discretisation to `segments` (pass the same value to ``hysys_pfr``).
     """
     fs = case.Flowsheet
     streams, ops = fs.MaterialStreams, fs.Operations
+    set_segments(ops("Reactor100"), segments)
     recycle = ops("RCY-1")
     recycle.CompSensitivityValue = RECYCLE_SENSITIVITY
     recycle.ComponentSensitivityValue = tuple(RECYCLE_SENSITIVITY for _ in recycle.ComponentSensitivityValue)
@@ -52,6 +64,7 @@ def cache_objects(case) -> dict:
         "column": ops("Twp101"),
         "flare": ops("CRV-100"),
         "recycle": recycle,
+        "segments": int(segments),
         # spreadsheet cells fan one number out to several specs; cells are unitless to COM.
         "pressure_cell": ops("MeOH Pressure").Cell("A1"),           # exported to kPa specs
         "ratio_cell": ops("co2:h2_ratio_equals_3").Cell("C2"),     # H2 : CO2 in the fresh feed
@@ -113,6 +126,7 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
                               / by_component(co2in, "ComponentMolarFlow", "kgmole/h")["CO2"]),
         "recycle_ratio": (read(o["recycle_gas"].MolarFlow, "kgmole/h")
                           / (read(co2in.MolarFlow, "kgmole/h") + read(h2in.MolarFlow, "kgmole/h"))),
+        "segments": o["segments"],
         "recycle_converged": recycle_ok,
         "column_converged": column_ok,
         "recycle_iterations": int(o["recycle"].IterationsValue),

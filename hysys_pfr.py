@@ -22,22 +22,30 @@ import time
 from datetime import datetime
 
 from hysys import read, write, by_component, solve
+from hysys_methanol import set_segments
 
 __all__ = ["cache_objects", "run_point"]
 
 FLOW_UNIT = "kgmole/h"          # unit of the in_* / out_* result keys
 
 
-def cache_objects(case) -> dict:
-    """Look up the streams and reactor used by `run_point` once per session."""
+def cache_objects(case, *, segments: int) -> dict:
+    """
+    Look up the streams and reactor used by `run_point` once per session and
+    set the PFR discretisation to `segments`, the same value the loop case
+    gets in ``hysys_methanol.cache_objects`` so both reactors agree.
+    """
     fs = case.Flowsheet
     rin = fs.MaterialStreams("RinV")
+    reactor = fs.Operations("Reactor100")
+    set_segments(reactor, segments)
     return {
         "solver": case.Solver,
         "rin": rin,                                  # reactor inlet: fully specified per point
         "rout": fs.MaterialStreams("RoutV"),         # reactor outlet
-        "reactor": fs.Operations("Reactor100"),
+        "reactor": reactor,
         "components": list(rin.FluidPackage.Components.Names),   # order of component arrays
+        "segments": int(segments),
     }
 
 
@@ -80,6 +88,7 @@ def run_point(objects: dict, *, pressure, temperature, volume, flows,
         "co_formation_kgmole_h": outlet["CO"] - inlet["CO"] if converged else None,
         "reactor_duty_kW": read(reactor.HeatFlow, "kW") if converged else None,
         "reactor_dP_bar": read(reactor.PressureDrop, "bar") if converged else None,
+        "segments": o["segments"],
         "converged": converged,
         "solve_time_s": round(time.time() - t0, 2),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
