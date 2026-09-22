@@ -1,14 +1,16 @@
 """
 Methanol loop with the PFR replaced by a surrogate.  The case is a copy of
-``methanol.hsc`` with Reactor100 ignored, so RoutV is free to be written.
-The tear RinV -> surrogate -> RoutV is iterated from Python; the rest of the
-flowsheet, including the separation and RCY-1, is still solved by HYSYS.
+``methanol_loop.hsc`` with Reactor100 ignored, so RoutV is free to be written,
+and without RCY-1: with the reactor ignored the HYSYS flowsheet has no cycle
+left, so the tear RinV -> surrogate -> RoutV is iterated from Python alone and
+the rest of the flowsheet, including the separation, is solved by HYSYS in one
+pass.
 
     from hysys import open_case
     from helpers import Surrogate
     from hysys_surrogate import cache_objects, run_point
 
-    case    = open_case("C:/.../open_methanol.hsc")
+    case    = open_case("C:/.../methanol_surrogate_no_rcy.hsc")
     objects = cache_objects(case, box)            # box: {name: (lo, hi)} in INPUTS order
     net     = Surrogate.load("pfr_surrogate_raw.txt")
     row     = run_point(objects, net, pressure=(90, "bar"), temperature=(250, "C"),
@@ -32,10 +34,6 @@ from hysys import read, write, by_component, to_internal, solve
 
 __all__ = ["cache_objects", "reactor_step", "is_converged", "run_point", "stoi_as_raw",
            "INPUTS", "COMPONENTS", "STOICH"]
-
-# RCY-1 stays in the cut case as a pass-through.  Its tolerance is set far below
-# the tear tolerance so it never holds back a change the net makes (HYSYS default 10).
-RECYCLE_SENSITIVITY = 0.001
 
 COMPONENTS = ["Hydrogen", "CO", "CO2", "H2O", "Methanol", "Nitrogen"]   # the ones that reach the reactor
 INPUTS = ["temperature_C", "pressure_bar", *COMPONENTS]                 # net input order
@@ -66,10 +64,6 @@ def cache_objects(case, box: dict) -> dict:
     rin = streams("RinV")
     if not ops("Reactor100").IsIgnored:
         raise RuntimeError("Reactor100 is active; this module expects the cut case with the reactor ignored")
-    recycle = ops("RCY-1")
-    recycle.CompSensitivityValue = RECYCLE_SENSITIVITY
-    recycle.ComponentSensitivityValue = tuple(RECYCLE_SENSITIVITY for _ in recycle.ComponentSensitivityValue)
-    recycle.FlowSensitivityValue = RECYCLE_SENSITIVITY
     return {
         "solver": case.Solver,
         "units": case.Application.UnitConversionSetManager,
@@ -84,7 +78,6 @@ def cache_objects(case, box: dict) -> dict:
         "split": ops("TEE-100"),
         "column": ops("Twp101"),
         "flare": ops("CRV-100"),
-        "recycle": recycle,
         "pressure_cell": ops("MeOH Pressure").Cell("A1"),
         "ratio_cell": ops("co2:h2_ratio_equals_3").Cell("C2"),
         "components": list(rin.FluidPackage.Components.Names),          # order of component arrays
