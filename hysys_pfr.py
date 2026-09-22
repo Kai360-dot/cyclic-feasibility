@@ -22,7 +22,7 @@ import time
 from datetime import datetime
 
 from hysys import read, write, by_component, solve
-from hysys_methanol import set_segments
+from hysys_loop import set_segments
 
 __all__ = ["cache_objects", "run_point"]
 
