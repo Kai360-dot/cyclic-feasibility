@@ -54,8 +54,8 @@ def open_case(path: str, visible: bool = True):
 
 def solve(solver, timeout: float) -> None:
     """Release the solver and block until it has finished forgetting and solving."""
-    solver.CanSolve = True
     start = time.time()
+    solver.CanSolve = True
     while solver.IsForgetting or solver.IsSolving:
         if time.time() - start > timeout:
             solver.CanSolve = False
