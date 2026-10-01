@@ -1,5 +1,5 @@
 """
-Generic helpers: trellis plots of 4-D point clouds, Sobol designs and a small
+Generic helpers: trellis and corner plots of point clouds, Sobol designs and a small
 MLP surrogate with k-fold cross-validation and adaptive width selection.
 
     X, Y = ...                                   # (n, d_in), (n, d_out) raw units
@@ -15,16 +15,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+from matplotlib.colors import Normalize
+from matplotlib.patches import Rectangle
 from scipy.stats import qmc
 
-__all__ = ["Trellis", "generate_sobol_points", "Surrogate", "fit_mlp", "cross_validate", "select_width", "hausdorff"]
+__all__ = ["Trellis", "Corner", "generate_sobol_points", "Surrogate", "fit_mlp", "cross_validate",
+           "select_width", "hausdorff"]
 
 
 # ---------------------------------------------------------------------------
-# Plotting: trellis of (x, y) panels binned by two further variables
+# Plotting: trellis and corner grids of scatter panels
 # ---------------------------------------------------------------------------
 class Trellis:
-    """Grid of (x, y) panels for 4-D point clouds: columns bin a third variable (low to high,
+    r"""Grid of (x, y) panels for 4-D point clouds: columns bin a third variable (low to high,
     left to right), rows bin a fourth (high to low, top to bottom). A strip above each column
     and right of each row marks its bin within the full range.
 
@@ -88,15 +91,13 @@ class Trellis:
 
     def scatter(self, x, y, col, row, **kwargs):
         """`Axes.scatter` of the points of every panel; returns the collections, one per panel
-        (row-major). Per-point keywords (`c`, `s`, ...) are split along with the points, a
-        numeric `c` shares one colour scale over all panels, `label` makes one legend entry."""
-        x, y = np.asarray(x), np.asarray(y)
+        (row-major). Per-point keywords (`c`, `s`, ... as arrays or lists) are split along with
+        the points, a numeric `c` shares one colour scale over all panels, `label` makes one
+        legend entry."""
+        x, y = np.asanyarray(x), np.asanyarray(y)
         per_point = {k: np.asarray(v) for k, v in kwargs.items()
-                     if not isinstance(v, str) and np.ndim(v) >= 1 and len(v) == x.size}
-        c = per_point.get("c")
-        if c is not None and c.ndim == 1 and c.dtype.kind in "fiu" and c.size and "norm" not in kwargs:
-            kwargs.setdefault("vmin", np.nanmin(c))
-            kwargs.setdefault("vmax", np.nanmax(c))
+                     if not isinstance(v, (str, tuple)) and np.ndim(v) >= 1 and len(v) == x.size}
+        _share_color_scale(kwargs, x.size)
         label = kwargs.pop("label", None)
         collections = []
         for ax, mask in self.split(col, row):
@@ -112,6 +113,93 @@ def _bin_index(values, edges):
     idx = np.searchsorted(edges, values, side="right") - 1
     idx[values == edges[-1]] = edges.size - 2
     return idx
+
+
+def _share_color_scale(kwargs, n):
+    """Scale a numeric per-point `c` (n values) on all its points, so every panel maps it alike."""
+    c = kwargs.get("c")
+    if c is None or isinstance(c, str):
+        return
+    c = np.asarray(c)
+    if c.shape != (n,) or c.dtype.kind not in "fiu" or not np.isfinite(c).any():
+        return
+    c = c[np.isfinite(c)]
+    if isinstance(kwargs.get("norm"), Normalize):
+        kwargs["norm"].autoscale_None(c)
+    else:
+        for key, value in (("vmin", c.min()), ("vmax", c.max())):
+            if kwargs.get(key) is None:
+                kwargs[key] = value
+
+
+class Corner:
+    r"""Lower triangle of pairwise panels for D-dimensional point clouds: `axes[r, c]` (c <= r)
+    shows dimension c on x against dimension r + 1 on y. `bounds` (2 x D: lower row, upper row)
+    are drawn as a dashed box with the ticks at its edges.
+
+        grid = Corner(["$T_1$ [K]", r"$\tau_1$ [min]", "$T_2$ [K]", r"$\tau_2$ [min]"], [lb, ub])
+        grid.scatter(dead.x, s=2, color="0.75", label="dead")           # as Axes.scatter
+        grid.scatter(live.x, s=2, color="royalblue", label="live")
+        grid.scatter(unit_1, dims=(0, 1), s=2, color="crimson")         # columns: dimensions 0, 1
+        grid.fig.legend()
+
+    `fig` and `axes` are the plain matplotlib objects; the unused upper-triangle axes are
+    hidden. Pass `fig` to choose the figure size or to put several corners side by side,
+    one per subfigure of `plt.figure(layout="constrained").subfigures(1, 2)`.
+    """
+
+    def __init__(self, labels, bounds=None, *, fig=None):
+        labels = list(labels)
+        n = len(labels) - 1
+        if n < 1:
+            raise ValueError("need at least two dimensions")
+        if bounds is not None:
+            bounds = np.asarray(bounds, dtype=float)
+            if bounds.shape != (2, n + 1) or not np.isfinite(bounds).all():
+                raise ValueError(f"bounds must be finite, of shape (2, {n + 1}); got shape {bounds.shape}")
+        if fig is None:
+            fig = plt.figure(figsize=(3.0 * n, 3.0 * n), layout="constrained")
+        self.fig = fig
+        self.axes = fig.subplots(n, n, sharex="col", sharey="row", squeeze=False)
+        self._ncolors = 0
+        for (r, c), ax in np.ndenumerate(self.axes):
+            ax.set_visible(c <= r)
+            if bounds is not None and c <= r:
+                (xlo, xhi), (ylo, yhi) = bounds[:, c], bounds[:, r + 1]
+                ax.add_patch(Rectangle((xlo, ylo), xhi - xlo, yhi - ylo, fill=False, linestyle="--",
+                                       edgecolor=plt.rcParams["axes.edgecolor"], zorder=3))
+                ax.set(xticks=bounds[:, c], yticks=bounds[:, r + 1])
+                ax.autoscale_view()
+        for c, ax in enumerate(self.axes[-1]):
+            ax.set_xlabel(labels[c])
+        for r, ax in enumerate(self.axes[:, 0]):
+            ax.set_ylabel(labels[r + 1])
+        fig.align_labels()
+
+    def scatter(self, X, dims=None, **kwargs):
+        """`Axes.scatter` of the points `X` (N, D) in every panel; returns the collections.
+        With `dims`, the columns of `X` are those dimensions only and just the panels pairing
+        two of them are drawn. A call without a colour takes the next one of the colour cycle
+        in all its panels, a numeric `c` shares one colour scale, `label` makes one legend entry."""
+        X = np.asanyarray(X)
+        ndim = self.axes.shape[0] + 1
+        dims = list(range(ndim) if dims is None else dims)
+        if len(set(dims)) != len(dims) or not set(dims) <= set(range(ndim)):
+            raise ValueError(f"dims must be distinct dimensions in 0..{ndim - 1}, got {dims}")
+        if X.ndim != 2 or X.shape[1] != len(dims):
+            raise ValueError(f"X must have shape (N, {len(dims)}), got {X.shape}")
+        if all(kwargs.get(k) is None for k in ("c", "color", "facecolor", "facecolors")):
+            kwargs["color"] = f"C{self._ncolors}"
+            self._ncolors += 1
+        _share_color_scale(kwargs, len(X))
+        column = {d: k for k, d in enumerate(dims)}
+        label = kwargs.pop("label", None)
+        collections = []
+        for (r, c), ax in np.ndenumerate(self.axes):
+            if c <= r and c in column and r + 1 in column:
+                collections.append(ax.scatter(X[:, column[c]], X[:, column[r + 1]], label=label, **kwargs))
+                label = None
+        return collections
 
 
 # ---------------------------------------------------------------------------
