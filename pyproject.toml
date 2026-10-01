@@ -1,5 +1,5 @@
 [project]
-name = "MeOH_HYSIS"
+name = "cyclic_feasibility"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
@@ -22,3 +22,10 @@ dev = [
 
 [tool.uv.sources]
 nested-sampler = { git = "https://github.com/Kai360-dot/NestedSampler.git" }
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["helpers", "hysys"]
