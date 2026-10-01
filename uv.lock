@@ -216,6 +216,45 @@ wheels = [
 ]
 
 [[package]]
+name = "cyclic-feasibility"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "jinja2" },
+    { name = "matplotlib" },
+    { name = "nested-sampler" },
+    { name = "numpy" },
+    { name = "openpyxl" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "pywin32" },
+    { name = "scipy" },
+    { name = "torch" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ipykernel" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "jinja2", specifier = ">=3.1.6" },
+    { name = "matplotlib", specifier = ">=3.10" },
+    { name = "nested-sampler", git = "https://github.com/Kai360-dot/NestedSampler.git" },
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "openpyxl", specifier = ">=3.1.5" },
+    { name = "pandas", specifier = ">=3.0.5" },
+    { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "pywin32", specifier = ">=312" },
+    { name = "scipy", specifier = ">=1.18.1" },
+    { name = "torch", specifier = ">=2.14.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ipykernel", specifier = ">=7.3.0" }]
+
+[[package]]
 name = "debugpy"
 version = "1.8.21"
 source = { registry = "https://pypi.org/simple" }
@@ -564,45 +603,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/bd/c0/9f7c9a46090390368
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/09/5b161152e2d90f7b87f781c2e1267494aef9c32498df793f73ad0a0a494a/matplotlib_inline-0.2.2-py3-none-any.whl", hash = "sha256:3c821cf1c209f59fb2d2d64abbf5b23b67bcb2210d663f9918dd851c6da1fcf6", size = 9534, upload-time = "2026-05-08T17:33:32.055Z" },
 ]
-
-[[package]]
-name = "meoh-hysis"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "jinja2" },
-    { name = "matplotlib" },
-    { name = "nested-sampler" },
-    { name = "numpy" },
-    { name = "openpyxl" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-    { name = "pywin32" },
-    { name = "scipy" },
-    { name = "torch" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ipykernel" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jinja2", specifier = ">=3.1.6" },
-    { name = "matplotlib", specifier = ">=3.10" },
-    { name = "nested-sampler", git = "https://github.com/Kai360-dot/NestedSampler.git" },
-    { name = "numpy", specifier = ">=2.0" },
-    { name = "openpyxl", specifier = ">=3.1.5" },
-    { name = "pandas", specifier = ">=3.0.5" },
-    { name = "pyarrow", specifier = ">=25.0.1" },
-    { name = "pywin32", specifier = ">=312" },
-    { name = "scipy", specifier = ">=1.18.1" },
-    { name = "torch", specifier = ">=2.14.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "ipykernel", specifier = ">=7.3.0" }]
 
 [[package]]
 name = "mpmath"

@@ -7,3 +7,4 @@ __pycache__/
 initial_exploration.ipynb
 *.csv
 TestAspenFile/methanol.bk0
+*.egg-info/*
