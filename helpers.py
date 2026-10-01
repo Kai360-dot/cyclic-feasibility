@@ -1,6 +1,6 @@
 """
-Generic helpers: Sobol designs and a small MLP surrogate with k-fold
-cross-validation and adaptive width selection.
+Generic helpers: trellis plots of 4-D point clouds, Sobol designs and a small
+MLP surrogate with k-fold cross-validation and adaptive width selection.
 
     X, Y = ...                                   # (n, d_in), (n, d_out) raw units
     width, table = select_width(X, Y)            # doubles hidden width until CV stops improving
@@ -9,12 +9,109 @@ cross-validation and adaptive width selection.
 """
 from __future__ import annotations
 
+import warnings
+
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 from scipy.stats import qmc
 
-__all__ = ["generate_sobol_points", "Surrogate", "fit_mlp", "cross_validate", "select_width", "hausdorff"]
+__all__ = ["Trellis", "generate_sobol_points", "Surrogate", "fit_mlp", "cross_validate", "select_width", "hausdorff"]
+
+
+# ---------------------------------------------------------------------------
+# Plotting: trellis of (x, y) panels binned by two further variables
+# ---------------------------------------------------------------------------
+class Trellis:
+    """Grid of (x, y) panels for 4-D point clouds: columns bin a third variable (low to high,
+    left to right), rows bin a fourth (high to low, top to bottom). A strip above each column
+    and right of each row marks its bin within the full range.
+
+        grid = Trellis(np.linspace(300, 350, 4), np.linspace(2, 30, 4),        # bin edges
+                       xlabel="$T_1$ [K]", ylabel=r"$\tau_1$ [min]",
+                       col_label="$T_2$ [K]", row_label=r"$\tau_2$ [min]")
+        grid.scatter(dead.T1, dead.tau1, dead.T2, dead.tau2, color="crimson", label="dead")
+        pcs = grid.scatter(live.T1, live.tau1, live.T2, live.tau2, c=margin)   # as Axes.scatter
+        grid.fig.colorbar(pcs[0], ax=grid.axes, label="margin")
+        grid.fig.legend()
+        grid.fig.savefig("trellis.png")
+
+    `fig` and `axes` (2-D array, `axes[0]` the top row) are the plain matplotlib objects.
+    Edges need not be uniform; `np.histogram_bin_edges(values, 3)` takes them from data. Bins
+    are [lo, hi), the last one [lo, hi]; points outside the edges appear in no panel (warned).
+    Further keywords go to `plt.subplots`.
+    """
+
+    def __init__(self, col_edges, row_edges, *, xlabel=None, ylabel=None,
+                 col_label=None, row_label=None, **subplots_kw):
+        self.col_edges = np.asarray(col_edges, dtype=float)
+        self.row_edges = np.asarray(row_edges, dtype=float)
+        for edges in (self.col_edges, self.row_edges):
+            if edges.ndim != 1 or edges.size < 2 or np.any(np.diff(edges) <= 0):
+                raise ValueError("bin edges must be 1-D, strictly increasing, at least two")
+        nrows, ncols = self.row_edges.size - 1, self.col_edges.size - 1
+        subplots_kw = {"figsize": (3.0 * ncols, 3.0 * nrows), "sharex": True, "sharey": True,
+                       "layout": "constrained", **subplots_kw}
+        self.fig, self.axes = plt.subplots(nrows, ncols, squeeze=False, **subplots_kw)
+
+        def title(label, lo, hi):
+            return f"{label}: {lo:.4g} to {hi:.4g}" if label else f"{lo:.4g} to {hi:.4g}"
+
+        for ax, lo, hi in zip(self.axes[0], self.col_edges[:-1], self.col_edges[1:]):
+            strip = ax.inset_axes([0.0, 1.04, 1.0, 0.06])
+            strip.axvspan(lo, hi, color="0.55")
+            strip.set(xlim=self.col_edges[[0, -1]], xticks=[], yticks=[])
+            strip.set_title(title(col_label, lo, hi), fontsize="medium")
+        for ax, lo, hi in zip(self.axes[::-1, -1], self.row_edges[:-1], self.row_edges[1:]):
+            strip = ax.inset_axes([1.04, 0.0, 0.06, 1.0])
+            strip.axhspan(lo, hi, color="0.55")
+            strip.set(ylim=self.row_edges[[0, -1]], xticks=[], yticks=[])
+            strip.yaxis.set_label_position("right")
+            strip.set_ylabel(title(row_label, lo, hi), rotation=270, va="bottom")
+        if xlabel:
+            self.fig.supxlabel(xlabel)
+        if ylabel:
+            self.fig.supylabel(ylabel)
+
+    def split(self, col, row):
+        """Yield `(ax, mask)` per panel, `mask` selecting the points whose `col` and `row` values
+        fall in the panel's bins. For drawing anything other than a scatter."""
+        nrows, ncols = self.axes.shape
+        j, i = _bin_index(col, self.col_edges), _bin_index(row, self.row_edges)
+        outside = (j < 0) | (j >= ncols) | (i < 0) | (i >= nrows)
+        if outside.any():
+            warnings.warn(f"{outside.sum()} of {outside.size} points lie outside the bin edges "
+                          "and appear in no panel", stacklevel=3)
+        for (r, c), ax in np.ndenumerate(self.axes):
+            yield ax, (i == nrows - 1 - r) & (j == c)
+
+    def scatter(self, x, y, col, row, **kwargs):
+        """`Axes.scatter` of the points of every panel; returns the collections, one per panel
+        (row-major). Per-point keywords (`c`, `s`, ...) are split along with the points, a
+        numeric `c` shares one colour scale over all panels, `label` makes one legend entry."""
+        x, y = np.asarray(x), np.asarray(y)
+        per_point = {k: np.asarray(v) for k, v in kwargs.items()
+                     if not isinstance(v, str) and np.ndim(v) >= 1 and len(v) == x.size}
+        c = per_point.get("c")
+        if c is not None and c.ndim == 1 and c.dtype.kind in "fiu" and c.size and "norm" not in kwargs:
+            kwargs.setdefault("vmin", np.nanmin(c))
+            kwargs.setdefault("vmax", np.nanmax(c))
+        label = kwargs.pop("label", None)
+        collections = []
+        for ax, mask in self.split(col, row):
+            point_kw = {k: v[mask] for k, v in per_point.items()}
+            collections.append(ax.scatter(x[mask], y[mask], label=label, **{**kwargs, **point_kw}))
+            label = None
+        return collections
+
+
+def _bin_index(values, edges):
+    """Bin of each value as `np.histogram` assigns it; no valid index for values outside."""
+    values = np.asarray(values, dtype=float)
+    idx = np.searchsorted(edges, values, side="right") - 1
+    idx[values == edges[-1]] = edges.size - 2
+    return idx
 
 
 # ---------------------------------------------------------------------------
