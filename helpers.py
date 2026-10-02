@@ -9,6 +9,7 @@ MLP surrogate with k-fold cross-validation and adaptive width selection.
 """
 from __future__ import annotations
 
+import time
 import warnings
 
 import matplotlib.pyplot as plt
@@ -20,7 +21,7 @@ from matplotlib.patches import Rectangle
 from scipy.stats import qmc
 
 __all__ = ["Trellis", "Corner", "generate_sobol_points", "Surrogate", "fit_mlp", "cross_validate",
-           "select_width", "hausdorff"]
+           "select_width", "train_surrogate", "hausdorff"]
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +330,26 @@ def select_width(X, Y, *, start: int = 4, tol: float = 0.05, k: int = 5, verbose
             break
         width *= 2
     return min(table, key=table.get), table
+
+
+def train_surrogate(X, Y, *, names=None, path=None, verbose=True):
+    """Width search, k-fold CV, final fit on all data; exports to `path` if given. `names`
+    label the outputs in the report. Returns (model, rmse, Y_oof)."""
+    Y = np.asarray(Y, dtype=float)
+    t0 = time.time()
+    width, table = select_width(X, Y, verbose=False)
+    rmse, Y_oof = cross_validate(X, Y, hidden=width)
+    model = fit_mlp(X, Y, hidden=width)
+    if path is not None:
+        model.export(path)
+    if verbose:
+        print(f"width {width} ({time.time() - t0:.0f} s)   CV rmse/std per width: "
+              + ", ".join(f"{w}: {v:.4f}" for w, v in table.items()))
+        names = [f"y{i}" for i in range(Y.shape[1])] if names is None else names
+        for name, r, span in zip(names, rmse, np.ptp(Y, axis=0)):
+            print(f"  {name:22s} {r:9.3f}   {100 * r / span:5.2f} % of range")
+    return model, rmse, Y_oof
+
 
 def eucl_dist(x, y):
     """Compute the euclidian distance"""
