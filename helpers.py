@@ -21,7 +21,7 @@ from matplotlib.patches import Rectangle
 from scipy.stats import qmc
 
 __all__ = ["Trellis", "Corner", "generate_sobol_points", "Surrogate", "fit_mlp", "cross_validate",
-           "select_width", "train_surrogate", "hausdorff"]
+           "select_width", "train_surrogate", "parity_plot", "hausdorff"]
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +349,40 @@ def train_surrogate(X, Y, *, names=None, path=None, verbose=True):
         for name, r, span in zip(names, rmse, np.ptp(Y, axis=0)):
             print(f"  {name:22s} {r:9.3f}   {100 * r / span:5.2f} % of range")
     return model, rmse, Y_oof
+
+
+def parity_plot(Y, Y_pred, names=None, *, ncols=3, **kwargs):
+    """Parity panels, one per output: predicted against true values with the diagonal and the
+    RMSE in the legend. `Y_pred` is one prediction (n, d_out) or a dict {label: prediction} to
+    compare several; `names` default to the columns of a DataFrame `Y`. Further keywords go to
+    `Axes.scatter`. Returns (fig, axes)."""
+    if names is None:
+        names = getattr(Y, "columns", None)
+    Y = np.asarray(Y, dtype=float)
+    Y = Y.reshape(len(Y), -1)
+    preds = Y_pred if isinstance(Y_pred, dict) else {None: Y_pred}
+    preds = {label: np.asarray(P, dtype=float).reshape(Y.shape) for label, P in preds.items()}
+    n = Y.shape[1]
+    names = [f"y{j}" for j in range(n)] if names is None else list(names)
+    ncols = min(ncols, n)
+    nrows = -(-n // ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.2 * ncols, 3.2 * nrows), squeeze=False,
+                             layout="constrained")
+    for j, ax in enumerate(axes.flat):
+        ax.set_visible(j < n)
+        if j >= n:
+            continue
+        for label, P in preds.items():
+            rmse = np.sqrt(np.nanmean((P[:, j] - Y[:, j]) ** 2))
+            ax.scatter(Y[:, j], P[:, j], label=f"{label}: RMSE {rmse:.3g}" if label else f"RMSE {rmse:.3g}",
+                       **{"s": 4, **kwargs})
+        centre = np.nanmean(Y[:, j])
+        ax.axline((centre, centre), slope=1, color="k", linestyle="--", linewidth=0.8)
+        ax.set_title(names[j])
+        ax.legend(fontsize="small")
+    fig.supxlabel("true")
+    fig.supylabel("predicted")
+    return fig, axes
 
 
 def eucl_dist(x, y):
