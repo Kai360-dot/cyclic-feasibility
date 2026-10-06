@@ -1,0 +1,103 @@
+diff --git a/src/nsfeas.hpp b/src/nsfeas.hpp
+index 7a82f67..8ed91b9 100644
+--- a/src/nsfeas.hpp
++++ b/src/nsfeas.hpp
+@@ -80,6 +80,9 @@ class NSFEAS : public virtual BASE_MBFA
+   //! @brief vector of sampled criteria values
+   std::vector<std::vector<double>> _vVALSAM;
+ 
++  //! @brief Failure flags of the proposals evaluated sequentially (aligned with _vVALSAM)
++  std::vector<bool> _vERRSAM;
++
+   //! @brief criteria subgraph
+   FFSubgraph _sgVAL;
+ 
+@@ -800,7 +803,7 @@ NSFEAS::_terminate(
+   }
+ 
+   if (options.MAXCPU > 0. &&
+-      stats.to_time(stats.lapse(tstart)) < options.MAXCPU)
++      stats.to_time(stats.lapse(tstart)) >= options.MAXCPU)
+     return (2);                                                  // interruption
+   if (options.MAXITER > 0 && it >= options.MAXITER) return (2);  // interruption
+ 
+@@ -898,6 +901,7 @@ NSFEAS::_sample_feas(
+     {
+       _vVALSAM.clear();
+       _vVALSAM.reserve(options.NUMPROP);
++      _vERRSAM.assign(options.NUMPROP, false);
+       for (size_t s = 0; s < options.NUMPROP; ++s)
+       {
+         std::vector<double> const& dCON = _vCONSAM[NSAM0 + s];
+@@ -908,7 +912,10 @@ NSFEAS::_sample_feas(
+         }
+         catch (...)
+         {
+-          ++stats.numerr;
++          // Keep _vVALSAM aligned with _vCONSAM: flag the failure and store a
++          // placeholder; the failure is counted when the live set is updated
++          _vERRSAM[s] = true;
++          _vVALSAM.push_back(_dVAL);
+           continue;
+         }
+ #ifdef MAGNUS__NSFEAS_SAMPLE_DEBUG
+@@ -927,13 +934,15 @@ NSFEAS::_sample_feas(
+     {
+       _dVAL                           = _vVALSAM[s];
+       std::vector<double> const& dCON = _vCONSAM[NSAM0 + s];
+-      // Check for failure during parallel evaluation
++      // Check for failure during parallel or sequential evaluation
+ #ifndef MAGNUS__NSFEAS_THREAD_FOREACH_SAMPLE
+-      if (_dag->options.MAXTHREAD != 1 && !_dag->veval_err().at(s))
++      if (_dag->options.MAXTHREAD != 1 ? !_dag->veval_err().at(s)
++                                        : _vERRSAM[s])
+       {
+ #else
+-      if (_vPARVAL.size() <= 1 && _dag->options.MAXTHREAD != 1 &&
+-          !_dag->veval_err().at(s))
++      if ((_vPARVAL.size() <= 1 && _dag->options.MAXTHREAD != 1)
++              ? !_dag->veval_err().at(s)
++              : _vERRSAM[s])
+       {
+ #endif
+ #ifdef MAGNUS__NSFEAS_SAMPLE_DEBUG
+@@ -1075,6 +1084,7 @@ NSFEAS::_sample_lkh(
+     {
+       _vVALSAM.clear();
+       _vVALSAM.reserve(options.NUMPROP);
++      _vERRSAM.assign(options.NUMPROP, false);
+       for (size_t s = 0; s < options.NUMPROP; ++s)
+       {
+         std::vector<double> const& dCON = _vCONSAM[NSAM0 + s];
+@@ -1085,7 +1095,10 @@ NSFEAS::_sample_lkh(
+         }
+         catch (...)
+         {
+-          ++stats.numerr;
++          // Keep _vVALSAM aligned with _vCONSAM: flag the failure and store a
++          // placeholder; the failure is counted when the live set is updated
++          _vERRSAM[s] = true;
++          _vVALSAM.push_back(_dVAL);
+           continue;
+         }
+ #ifdef MAGNUS__NSFEAS_SAMPLE_DEBUG
+@@ -1104,13 +1117,15 @@ NSFEAS::_sample_lkh(
+     {
+       _dVAL                           = _vVALSAM[s];
+       std::vector<double> const& dCON = _vCONSAM[NSAM0 + s];
+-      // Check for failure during parallel evaluation
++      // Check for failure during parallel or sequential evaluation
+ #ifndef MAGNUS__NSFEAS_THREAD_FOREACH_SAMPLE
+-      if (_dag->options.MAXTHREAD != 1 && !_dag->veval_err().at(s))
++      if (_dag->options.MAXTHREAD != 1 ? !_dag->veval_err().at(s)
++                                        : _vERRSAM[s])
+       {
+ #else
+-      if (_vPARVAL.size() <= 1 && _dag->options.MAXTHREAD != 1 &&
+-          !_dag->veval_err().at(s))
++      if ((_vPARVAL.size() <= 1 && _dag->options.MAXTHREAD != 1)
++              ? !_dag->veval_err().at(s)
++              : _vERRSAM[s])
+       {
+ #endif
+ #ifdef MAGNUS__NSFEAS_SAMPLE_DEBUG
