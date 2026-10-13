@@ -12,6 +12,15 @@ import matplotlib.pyplot as plt
 FIGURES_DIR = Path(r"C:\Users\kr326\Documents\MScThesis\figures")
 
 
+def save(fig, name: str) -> Path:
+    """Save `fig` as FIGURES_DIR/<name>.png, creating sub-folders as needed, e.g.
+    save(grid.fig, "Cases/LinearCascade/corner_simultaneous")."""
+    path = FIGURES_DIR / f"{name}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path)
+    return path
+
+
 def setup(font_size: float = 14, markerscale: float = 1.5, dpi: int = 300, retina: bool = True) -> None:
     """Apply the notebook plot settings for the rest of the session.
 
