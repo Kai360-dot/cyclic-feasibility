@@ -37,7 +37,7 @@ class Trellis:
                        col_label="$T_2$ [K]", row_label=r"$\tau_2$ [min]")
         grid.scatter(dead.T1, dead.tau1, dead.T2, dead.tau2, color="crimson", label="dead")
         pcs = grid.scatter(live.T1, live.tau1, live.T2, live.tau2, c=margin)   # as Axes.scatter
-        grid.fig.colorbar(pcs[0], ax=grid.axes, label="margin")
+        grid.colorbar(pcs[0], label="margin")              # widens the figure, panels keep their size
         grid.fig.legend()
         grid.fig.savefig("trellis.png")
 
@@ -60,7 +60,7 @@ class Trellis:
         self.fig, self.axes = plt.subplots(nrows, ncols, squeeze=False, **subplots_kw)
 
         def title(label, lo, hi):
-            return f"{label}: {lo:.4g} to {hi:.4g}" if label else f"{lo:.4g} to {hi:.4g}"
+            return f"{label}: {lo:.5g} to {hi:.5g}" if label else f"{lo:.5g} to {hi:.5g}"
 
         for ax, lo, hi in zip(self.axes[0], self.col_edges[:-1], self.col_edges[1:]):
             strip = ax.inset_axes([0.0, 1.04, 1.0, 0.06])
@@ -106,6 +106,20 @@ class Trellis:
             collections.append(ax.scatter(x[mask], y[mask], label=label, **{**kwargs, **point_kw}))
             label = None
         return collections
+
+    def colorbar(self, mappable, **kwargs):
+        """`Figure.colorbar` beside all panels, keywords as there. The figure is widened by what
+        the panels lose to the colorbar (bar, ticks, label, pad), so they keep the size they have
+        without one and the column titles keep their room."""
+        def panel_width():                                     # inches, after laying the figure out
+            self.fig.draw_without_rendering()
+            return self.axes[0, 0].get_position().width * self.fig.get_figwidth()
+
+        target = panel_width()
+        cb = self.fig.colorbar(mappable, ax=self.axes, **kwargs)
+        for _ in range(3):      # margins depend on the width (titles overflow narrow panels): iterate
+            self.fig.set_figwidth(self.fig.get_figwidth() + self.axes.shape[1] * (target - panel_width()))
+        return cb
 
 
 def _bin_index(values, edges):
