@@ -1,6 +1,7 @@
 """
-Generic helpers: trellis and corner plots of point clouds, Sobol designs and a small
-MLP surrogate with k-fold cross-validation and adaptive width selection.
+Generic helpers: trellis and corner plots of point clouds, Sobol designs, the MAGNUS nested
+sampler behind a plain interface, and a small MLP surrogate with k-fold cross-validation and
+adaptive width selection.
 
     X, Y = ...                                   # (n, d_in), (n, d_out) raw units
     width, table = select_width(X, Y)            # doubles hidden width until CV stops improving
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import time
 import warnings
+from dataclasses import dataclass, field
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,8 +22,9 @@ from matplotlib.colors import Normalize
 from matplotlib.patches import Rectangle
 from scipy.stats import qmc
 
-__all__ = ["Trellis", "Corner", "generate_sobol_points", "Surrogate", "fit_mlp", "cross_validate",
-           "select_width", "train_surrogate", "parity_plot", "hausdorff"]
+__all__ = ["Trellis", "Corner", "generate_sobol_points", "NestedSampler", "Result", "PointSet", "Stats",
+           "Surrogate", "fit_mlp", "cross_validate", "select_width", "train_surrogate", "parity_plot",
+           "hausdorff"]
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +229,133 @@ def generate_sobol_points(n: int, bounds, seed: int = 42):
     m = int(np.ceil(np.log2(n)))
     pts = qmc.Sobol(d=bounds.shape[1], seed=seed).random_base2(m)
     return qmc.scale(pts, bounds[0], bounds[1])[:n]
+
+
+# ---------------------------------------------------------------------------
+# Nested sampling: MAGNUS NSFeas behind the interface of the nested_sampler port
+# ---------------------------------------------------------------------------
+@dataclass
+class PointSet:
+    """Points `x` (N, nx) with their criterion `value` (N,), the largest constraint value:
+    a point is feasible iff `value <= 0`."""
+
+    x: np.ndarray
+    value: np.ndarray
+
+    @property
+    def feasible(self):
+        return self.value <= 0
+
+    def __len__(self):
+        return len(self.value)
+
+
+@dataclass
+class Stats:
+    iterations: int
+    evaluations: int        # every attempted point, failed ones included
+    failures: int
+    feasible: int
+    walltime: float
+
+
+@dataclass
+class Result:
+    """Outcome of `NestedSampler.sample`: `live` in ascending criterion, `dead` in order of
+    death, `discarded` the rejected proposals. `status` is MAGNUS's `NSFeas.STATUS`."""
+
+    status: object
+    stats: Stats
+    live: PointSet
+    dead: PointSet
+    discarded: PointSet
+    lb: np.ndarray = field(repr=False)
+    ub: np.ndarray = field(repr=False)
+
+    @property
+    def converged(self):
+        """True when the sampler stopped because every live point is feasible."""
+        return self.status.name == "NORMAL"
+
+    def summary(self):
+        s = self.stats
+        return (f"status:      {self.status.name}\n"
+                f"iterations:  {s.iterations}\n"
+                f"evaluations: {s.evaluations} ({s.failures} failed)\n"
+                f"wall time:   {s.walltime:.2f} s\n"
+                f"live:        {len(self.live)} points, {int(self.live.feasible.sum())} feasible, "
+                f"contour {self.live.value.max():.4e}\n"
+                f"dead:        {len(self.dead)} points\n"
+                f"discarded:   {len(self.discarded)} points")
+
+
+class NestedSampler:
+    """Nested sampling of the feasible region of `constraints` in the box [lb, ub] with MAGNUS's
+    `NSFeas` (the patched build of env_install.md), behind the interface of the `nested_sampler`
+    port so the two are interchangeable:
+
+        result = NestedSampler(g, lb, ub, num_live=8192, num_prop=256).sample()
+        result.live.x, result.live.value          # (N, nx), (N,): feasible iff value <= 0
+        result.dead.x, result.discarded.x, result.stats.evaluations, result.lb, result.ub
+
+    `constraints(x)` returns the constraint values of one point `x` (1-D array), feasible iff all
+    are <= 0; an exception or a NaN marks the evaluation as failed (the point is dropped and
+    counted in `stats.failures`). Only their maximum enters the DAG, which is the criterion
+    NSFeas forms from the separate constraints anyway (checked point for point).
+    Options and their MAGNUS names: `num_live` NUMLIVE, `num_prop` NUMPROP, `ell_mag` ELLMAG,
+    `ell_red` ELLRED, `max_iter` MAXITER, `max_err` MAXERR (initialisation only), `max_time`
+    MAXCPU [s], `display` DISPLEVEL, `display_iter` DISPITER; 0 is no limit. There is no seed:
+    the pseudo-random stream is process-global, so only the first run of a kernel repeats.
+    A function that fails at every point hangs the initialisation unless `max_err` is set, and
+    a kernel interrupt is swallowed with the other exceptions: restart the kernel.
+    """
+
+    def __init__(self, constraints, lb, ub, *, num_live=256, num_prop=16, ell_mag=0.30, ell_red=0.20,
+                 max_iter=0, max_err=0, max_time=0.0, display=1, display_iter=25):
+        self.constraints = constraints
+        self.lb, self.ub = np.array(lb, dtype=float).ravel(), np.array(ub, dtype=float).ravel()
+        if self.lb.size == 0 or self.lb.shape != self.ub.shape or not np.all(self.lb < self.ub):
+            raise ValueError("lb must be strictly below ub in every dimension")
+        self.options = dict(NUMLIVE=int(num_live), NUMPROP=int(num_prop), ELLMAG=float(ell_mag),
+                            ELLRED=float(ell_red), MAXITER=int(max_iter), MAXERR=int(max_err),
+                            MAXCPU=float(max_time), DISPLEVEL=int(display), DISPITER=int(display_iter),
+                            MAXTHREAD=1)                            # a Python callback needs the GIL
+
+    def _max_constraint(self, x):
+        g = np.asarray(self.constraints(np.asarray(x, dtype=float)), dtype=float).ravel()
+        if g.size == 0 or np.isnan(g).any():
+            raise ValueError(f"constraints returned {g} at {x}")
+        return [float(g.max())]
+
+    def sample(self):
+        """Run the sampler and return a `Result`."""
+        import pymc
+        from magnus import NSFeas
+        dag = pymc.FFGraph()
+        dag.options.MAXTHREAD = 1
+        x = [dag.add_var(f"x{i}") for i in range(self.lb.size)]
+        op = pymc.FFCustom()
+        op.set_D_eval(self._max_constraint)
+        ns = NSFeas()
+        for name, value in self.options.items():
+            setattr(ns.options, name, value)
+        ns.set_dag(dag)
+        ns.set_control(x, self.lb.tolist(), self.ub.tolist())
+        ns.set_constraint(op(var=x, uid=0))
+        if not ns.setup():
+            raise RuntimeError("NSFeas.setup failed")
+        t0 = time.time()
+        status = NSFeas.STATUS(ns.sample())
+        walltime = time.time() - t0
+        if self.options["DISPLEVEL"] > 0:
+            ns.stats.display()
+
+        def points(raw):
+            return PointSet(np.asarray(raw[0], dtype=float), np.asarray(raw[1], dtype=float).ravel())
+
+        stats = Stats(ns.stats.iter, ns.stats.numfct, ns.stats.numerr, ns.stats.numfeas, walltime)
+        return Result(status, stats, points(ns.live_points), points(ns.dead_points),
+                      points(ns.discard_points), self.lb, self.ub)
 
 
 # ---------------------------------------------------------------------------
