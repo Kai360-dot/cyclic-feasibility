@@ -17,7 +17,7 @@ import time
 import pythoncom
 import win32com.client
 
-__all__ = ["open_case", "solve", "read", "write", "by_component", "to_internal",
+__all__ = ["open_case", "solve", "read", "write", "by_component", "to_internal", "convert",
            "unit_of", "members", "dump"]
 
 
@@ -105,6 +105,15 @@ def to_internal(units, quantity: str, value) -> float:
     """
     number, unit = _pair(value)
     return units.Item(quantity).Item(unit).ToCalculationUnit(number)
+
+
+def convert(units, quantity: str, value, unit: str) -> float:
+    """
+    Convert a ``(number, "unit")`` pair of `quantity` to `unit`, by HYSYS:
+    ``convert(units, "Pressure", (90, "bar"), "kPa")`` -> 9000.0.
+    """
+    uset = units.Item(quantity)
+    return uset.Item(unit).FromCalculationUnit(to_internal(units, quantity, value))
 
 
 def unit_of(units, variable) -> tuple[str, str]:

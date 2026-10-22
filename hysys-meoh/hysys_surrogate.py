@@ -15,6 +15,7 @@ pass.
     net     = Surrogate.load("pfr_surrogate_raw.txt")
     row     = run_point(objects, net, pressure=(90, "bar"), temperature=(250, "C"),
                         ratio=3.0, purge_rate=0.03)
+    row2    = run_point(..., warm=row["tear_state"])     # start the tear at row's converged outlet
 
 The net is the "raw" surrogate from ``methanol_surrogate_pipeline.ipynb``:
 inputs in `INPUTS` order (C, bar, kgmole/s), outputs the six outlet flows in
@@ -30,7 +31,7 @@ from datetime import datetime
 
 import numpy as np
 
-from hysys import read, write, by_component, to_internal, solve
+from hysys import read, write, by_component, to_internal, convert, solve
 
 __all__ = ["cache_objects", "reactor_step", "is_converged", "run_point", "stoi_as_raw",
            "INPUTS", "COMPONENTS", "STOICH"]
@@ -116,13 +117,18 @@ def is_converged(new, old, tol: float = 1e-3) -> bool:
     return float((np.abs(new - old) / (np.abs(new) + 1e-8)).max()) < tol
 
 
-def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate,
+def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate, warm: dict | None = None,
               tol: float = 1e-3, max_passes: int = 100, timeout: float = 120.0) -> dict:
     """
     Set the operating point, iterate the tear until `is_converged`, and return
     the same result row as ``hysys_methanol.run_point`` with the reactor
     quantities taken from the net, plus `tear_passes`, `tear_converged` and
     `outside_box` from the last pass.  No volume: the net was trained at one.
+
+    `warm` is a ``tear_state`` of an earlier row: the reactor outlet (kgmole/h)
+    and pressure drop (bar) to write into RoutV before the first pass; without
+    it RoutV holds whatever the previous point left.  The row records its own
+    converged ``tear_state``.
     """
     o = objects
     solver = o["solver"]
@@ -136,6 +142,10 @@ def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate,
     write(o["rout"].Temperature, temperature)       # isothermal reactor, as in the original case
     o["ratio_cell"].CellValue = float(ratio)
     o["split"].SplitsValue = (float(purge_rate), 1.0 - float(purge_rate))
+    if warm is not None:
+        rout = o["rout"]
+        rout.ComponentMolarFlow.SetValues(tuple(float(warm["outlet_kgmole_h"].get(c, 0.0)) for c in o["components"]), "kgmole/h")
+        write(rout.Pressure, (convert(o["units"], "Pressure", pressure, "bar") - warm["dP_bar"], "bar"))
     solve(solver, timeout)                          # propagate the new inputs to RinV
 
     old, tear_ok = None, False
@@ -176,6 +186,7 @@ def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate,
         "tear_converged": tear_ok,
         "column_converged": column_ok,
         "outside_box": step["outside_box"],
+        "tear_state": {"outlet_kgmole_h": step["outlet_kgmole_h"], "dP_bar": step["dP_bar"]},
         "converged": tear_ok and column_ok,
         "solve_time_s": round(time.time() - t0, 2),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

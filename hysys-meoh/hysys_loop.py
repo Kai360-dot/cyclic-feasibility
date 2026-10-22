@@ -20,7 +20,7 @@ from datetime import datetime
 
 from hysys import read, write, by_component, to_internal, solve
 
-__all__ = ["cache_objects", "run_point"]
+__all__ = ["cache_objects", "run_point", "tear_state", "write_tear_state"]
 
 # Recycle composition tolerance multiplier (HYSYS default 10).
 RECYCLE_SENSITIVITY     = 0.1
@@ -34,6 +34,27 @@ def set_segments(reactor, segments: int) -> None:
     reactor.NumberOfSegments = segments
     if int(reactor.NumberOfSegments) != segments:
         raise RuntimeError(f"{reactor.Name}: NumberOfSegments is {reactor.NumberOfSegments}, wanted {segments}")
+
+
+def tear_state(objects: dict) -> dict:
+    """
+    The recycle's current tear guess: VAPToMixer (RCY-1's product stream) as
+    component flows in kgmole/h, temperature in C and pressure in bar.
+    Pass it back through ``run_point(..., warm=state)`` to start the recycle there.
+    """
+    s = objects["recycle_gas"]
+    return {"flows_kgmole_h": by_component(s, "ComponentMolarFlow", "kgmole/h"),
+            "temperature_C": read(s.Temperature, "C"),
+            "pressure_bar": read(s.Pressure, "bar")}
+
+
+def write_tear_state(objects: dict, state: dict) -> None:
+    """Overwrite the recycle's tear guess with `state` (from `tear_state`); solver must be frozen."""
+    s = objects["recycle_gas"]
+    names = s.FluidPackage.Components.Names
+    s.ComponentMolarFlow.SetValues(tuple(float(state["flows_kgmole_h"].get(c, 0.0)) for c in names), "kgmole/h")
+    write(s.Temperature, (state["temperature_C"], "C"))
+    write(s.Pressure, (state["pressure_bar"], "bar"))
 
 
 def cache_objects(case, *, segments: int) -> dict:
@@ -74,13 +95,18 @@ def cache_objects(case, *, segments: int) -> dict:
 
 
 def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate,
-              timeout: float = 120.0) -> dict:
+              warm: dict | None = None, timeout: float = 120.0) -> dict:
     """
     Set the operating point, solve, and return one flat result row.
 
     Freezes the solver, ignores the column and flare so the synthesis loop
     converges on its own, applies the inputs, solves, restores the column and
     flare, solves again.  Filter rows on ``converged`` before trusting them.
+
+    `warm` is a `tear_state` (the row key of the same name) to start the
+    recycle from; without it the recycle starts from whatever the previous
+    solve left in VAPToMixer.  The row records the converged state as
+    ``tear_state``.
     """
     o = objects
     solver = o["solver"]
@@ -95,6 +121,8 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
     write(o["reactor"].TotalVolume, volume)
     o["ratio_cell"].CellValue = float(ratio)
     o["split"].SplitsValue = (float(purge_rate), 1.0 - float(purge_rate))
+    if warm is not None:
+        write_tear_state(o, warm)
     solve(solver, timeout)
     o["column"].IsIgnored = False
     o["flare"].IsIgnored = False
@@ -132,6 +160,7 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
         "recycle_converged": recycle_ok,
         "column_converged": column_ok,
         "recycle_iterations": int(o["recycle"].IterationsValue),
+        "tear_state": tear_state(o),
         "converged": recycle_ok and column_ok,
         "solve_time_s": round(time.time() - t0, 2),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
