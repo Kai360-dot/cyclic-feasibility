@@ -23,8 +23,8 @@ from hysys import read, write, by_component, to_internal, solve
 __all__ = ["cache_objects", "run_point"]
 
 # Recycle composition tolerance multiplier (HYSYS default 10).
-RECYCLE_SENSITIVITY = 0.1
-
+RECYCLE_SENSITIVITY     = 0.1
+RECYCLE_MAX_ITERATIONS  = 500
 
 def set_segments(reactor, segments: int) -> None:
     """Set the PFR's number of integration segments and verify it took."""
@@ -39,7 +39,8 @@ def set_segments(reactor, segments: int) -> None:
 def cache_objects(case, *, segments: int) -> dict:
     """
     Look up streams, unit operations and cells used by `run_point` once per
-    session, tighten the recycle tolerance to `RECYCLE_SENSITIVITY` and set the
+    session, tighten the recycle tolerance to `RECYCLE_SENSITIVITY`,
+    change iteration cap to `RECYCLE_MAX_ITERATIONS` and set the
     PFR discretisation to `segments` (pass the same value to ``hysys_pfr``).
     """
     fs = case.Flowsheet
@@ -48,6 +49,7 @@ def cache_objects(case, *, segments: int) -> dict:
     recycle = ops("RCY-1")
     recycle.CompSensitivityValue = RECYCLE_SENSITIVITY
     recycle.ComponentSensitivityValue = tuple(RECYCLE_SENSITIVITY for _ in recycle.ComponentSensitivityValue)
+    recycle.MaximumIterationsValue = RECYCLE_MAX_ITERATIONS
     return {
         "solver": case.Solver,
         "units": case.Application.UnitConversionSetManager,
