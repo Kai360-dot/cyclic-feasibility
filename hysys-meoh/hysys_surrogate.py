@@ -33,12 +33,14 @@ import numpy as np
 
 from hysys import read, write, by_component, to_internal, convert, solve
 
-__all__ = ["cache_objects", "reactor_step", "is_converged", "run_point", "stoi_as_raw",
-           "INPUTS", "COMPONENTS", "STOICH"]
+__all__ = ["cache_objects", "predict", "write_outlet", "reactor_step", "wegstein", "is_converged", "run_point",
+           "stoi_as_raw", "INPUTS", "COMPONENTS", "STOICH", "WEGSTEIN_Q", "WEGSTEIN_COUNT"]
 
 COMPONENTS = ["Hydrogen", "CO", "CO2", "H2O", "Methanol", "Nitrogen"]   # the ones that reach the reactor
 INPUTS = ["temperature_C", "pressure_bar", *COMPONENTS]                 # net input order
 STOICH = np.array([[-3, -1], [0, 1], [-1, -1], [1, 1], [1, 0], [0, 0]], float)   # rows COMPONENTS, cols xi1, xi2
+WEGSTEIN_Q = (-20.0, 0.0)       # bounds of the Wegstein factor, as RCY-1 in the loop case; q = 0 is plain substitution
+WEGSTEIN_COUNT = 3              # direct-substitution passes before acceleration starts, as RCY-1's Wegstein count
 
 
 def stoi_as_raw(net):
@@ -86,29 +88,57 @@ def cache_objects(case, box: dict) -> dict:
     }
 
 
+def predict(objects: dict, net):
+    """Read RinV and evaluate the net: the input vector `x` (INPUTS order), the six
+    outlet flows in kgmole/h (COMPONENTS order, negatives clipped), duty in kW, pressure drop in bar."""
+    rin = objects["rin"]
+    flows = by_component(rin, "ComponentMolarFlow", "kgmole/s")
+    x = np.array([read(rin.Temperature, "C"), read(rin.Pressure, "bar"), *(flows[c] for c in COMPONENTS)])
+    pred = net(x)
+    return x, np.maximum(pred[:6], 0.0), float(pred[6]), float(pred[7])
+
+
+def write_outlet(objects: dict, outlet, pressure_bar: float, timeout: float) -> None:
+    """Write the six outlet flows (kgmole/h, COMPONENTS order) and the pressure into RoutV and solve."""
+    o = objects
+    by_name = dict(zip(COMPONENTS, outlet))
+    o["solver"].CanSolve = False
+    o["rout"].ComponentMolarFlow.SetValues(tuple(float(by_name.get(c, 0.0)) for c in o["components"]), "kgmole/h")
+    write(o["rout"].Pressure, (pressure_bar, "bar"))
+    solve(o["solver"], timeout)
+
+
+def outside_box(objects: dict, x) -> list[str]:
+    """Names of the inputs in `x` outside the training box."""
+    return [k for k, v, (lo, hi) in zip(INPUTS, x, objects["box"].values()) if not lo <= v <= hi]
+
+
 def reactor_step(objects: dict, net, timeout: float = 120.0) -> dict:
     """
-    One pass of the tear: read RinV, evaluate the net, write RoutV, solve.
+    One plain pass of the tear: read RinV, evaluate the net, write RoutV, solve.
 
     Returns the net input vector `x` (INPUTS order), the predicted outlet flows
     in kgmole/h, duty, pressure drop, net CO formation, and `outside_box`, the
     names of inputs outside the training box.
     """
-    o = objects
-    rin, rout = o["rin"], o["rout"]
-    flows = by_component(rin, "ComponentMolarFlow", "kgmole/s")
-    x = np.array([read(rin.Temperature, "C"), read(rin.Pressure, "bar"), *(flows[c] for c in COMPONENTS)])
-    y = net(x)
-    outlet = dict(zip(COMPONENTS, np.maximum(y[:6], 0.0)))              # kgmole/h; clip numerical negatives
-    duty, dp = float(y[6]), float(y[7])
+    x, outlet_pred, duty, dp = predict(objects, net)
+    write_outlet(objects, outlet_pred, x[1] - dp, timeout)
+    return {"x": x, "outlet_kgmole_h": dict(zip(COMPONENTS, outlet_pred)), "duty_kW": duty, "dP_bar": dp,
+            "co_formation_kgmole_h": outlet_pred[1] - x[3] * 3600.0, "outside_box": outside_box(objects, x)}
 
-    o["solver"].CanSolve = False
-    rout.ComponentMolarFlow.SetValues(tuple(float(outlet.get(c, 0.0)) for c in o["components"]), "kgmole/h")
-    write(rout.Pressure, (x[1] - dp, "bar"))
-    solve(o["solver"], timeout)
-    outside = [k for k, v, (lo, hi) in zip(INPUTS, x, o["box"].values()) if not lo <= v <= hi]
-    return {"x": x, "outlet_kgmole_h": outlet, "duty_kW": duty, "dP_bar": dp,
-            "co_formation_kgmole_h": outlet["CO"] - flows["CO"] * 3600.0, "outside_box": outside}
+
+def wegstein(x_prev, g_prev, x, g):
+    """
+    Wegstein update of the fixed-point iteration x <- g(x), per component: with the
+    slope s of the secant through the last two passes, q = s / (s - 1) bounded by
+    `WEGSTEIN_Q`, the next iterate is q * x + (1 - q) * g.  q = 0 is plain substitution,
+    which is also what a vanishing step or a slope of one falls back to.
+    """
+    dx, dg = x - x_prev, g - g_prev
+    s = np.divide(dg, dx, out=np.zeros_like(dx), where=np.abs(dx) > 1e-9)
+    q = np.divide(s, s - 1.0, out=np.zeros_like(s), where=np.abs(s - 1.0) > 1e-9)
+    q = np.clip(q, *WEGSTEIN_Q)
+    return q * x + (1 - q) * g
 
 
 def is_converged(new, old, tol: float = 1e-3) -> bool:
@@ -118,7 +148,7 @@ def is_converged(new, old, tol: float = 1e-3) -> bool:
 
 
 def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate, warm: dict | None = None,
-              tol: float = 1e-3, max_passes: int = 100, timeout: float = 120.0) -> dict:
+              accelerate: bool = True, tol: float = 1e-3, max_passes: int = 100, timeout: float = 120.0) -> dict:
     """
     Set the operating point, iterate the tear until `is_converged`, and return
     the same result row as ``hysys_methanol.run_point`` with the reactor
@@ -129,6 +159,12 @@ def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate, w
     and pressure drop (bar) to write into RoutV before the first pass; without
     it RoutV holds whatever the previous point left.  The row records its own
     converged ``tear_state``.
+
+    With `accelerate` the outlet written each pass is the Wegstein update
+    ``q * outlet + (1 - q) * outlet_pred`` per component, where `outlet` is what RoutV
+    holds and `outlet_pred` what the net returns for it, q from the secant of the last two
+    passes, bounded by `WEGSTEIN_Q` and applied after `WEGSTEIN_COUNT` direct passes, the
+    settings of RCY-1 in the loop case; otherwise plain successive substitution.
     """
     o = objects
     solver = o["solver"]
@@ -149,13 +185,23 @@ def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate, w
     solve(solver, timeout)                          # propagate the new inputs to RinV
 
     old, tear_ok = None, False
+    outlet_prev = pred_prev = None                  # RoutV and net outlet of the previous pass
+    flows = by_component(o["rout"], "ComponentMolarFlow", "kgmole/h")
+    outlet = np.array([flows[c] for c in COMPONENTS])   # what RoutV holds now (warm state or leftover)
     for passes in range(1, max_passes + 1):
-        step = reactor_step(o, net, timeout)
-        x = step["x"][2:]                           # the six RinV flows are the tear vector
-        if old is not None and is_converged(x, old, tol):
+        x, outlet_pred, duty, dp = predict(o, net)  # the net's outlet for the inlet that `outlet` produced
+        if accelerate and passes > WEGSTEIN_COUNT:
+            outlet_new = wegstein(outlet_prev, pred_prev, outlet, outlet_pred)
+        else:
+            outlet_new = outlet_pred
+        write_outlet(o, np.maximum(outlet_new, 0.0), x[1] - dp, timeout)   # clip numerical negatives
+        outlet_prev, pred_prev, outlet = outlet, outlet_pred, outlet_new
+        if old is not None and is_converged(x[2:], old, tol):   # the six RinV flows are the tear vector
             tear_ok = True
             break
-        old = x
+        old = x[2:]
+    step = {"outlet_kgmole_h": dict(zip(COMPONENTS, outlet)), "duty_kW": duty, "dP_bar": dp,
+            "co_formation_kgmole_h": outlet_pred[1] - x[3] * 3600.0, "outside_box": outside_box(o, x)}
     o["column"].IsIgnored = False
     o["flare"].IsIgnored = False
     solve(solver, timeout)
