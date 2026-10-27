@@ -20,10 +20,11 @@ from datetime import datetime
 
 from hysys import read, write, by_component, to_internal, solve
 
-__all__ = ["cache_objects", "run_point", "tear_state", "write_tear_state"]
+__all__ = ["cache_objects", "run_point", "tear_state", "write_tear_state", "set_inert", "feed_nominal"]
 
-# Recycle composition tolerance multiplier (HYSYS default 10).
-RECYCLE_SENSITIVITY     = 0.1
+# Recycle composition tolerance multiplier (HYSYS default 10): 1.0 gives a start-to-start repeatability of
+# ~15 kg/h methanol and ~0.02 kgmole/h CO, comparable to the surrogate tear, at ~40 % fewer iterations than 0.1.
+RECYCLE_SENSITIVITY     = 1.0
 RECYCLE_MAX_ITERATIONS  = 500
 
 def set_segments(reactor, segments: int) -> None:
@@ -57,6 +58,29 @@ def write_tear_state(objects: dict, state: dict) -> None:
     write(s.Pressure, (state["pressure_bar"], "bar"))
 
 
+def feed_nominal(stream) -> dict:
+    """The feed's nominal make-up: component flows in kgmole/h and its N2 mole fraction, read once per session."""
+    flows = by_component(stream, "ComponentMolarFlow", "kgmole/h")
+    return {"flows_kgmole_h": flows, "n2_fraction": flows["Nitrogen"] / sum(flows.values())}
+
+
+def set_inert(objects: dict, n2_fraction: float) -> None:
+    """
+    Set the N2 mole fraction of the CO2 feed.  The feed's other component flows
+    (CO2, water) stay at their nominal values: nitrogen is added on top, so the
+    CO2 flow and with it the H2 feed set by the ratio cell are unchanged.
+    Solver must be frozen.
+    """
+    o = objects
+    s = o["co2in"]
+    base = {c: v for c, v in o["co2_nominal"]["flows_kgmole_h"].items() if c != "Nitrogen"}
+    total = sum(base.values()) / (1.0 - float(n2_fraction))
+    x = {c: v / total for c, v in base.items()}
+    x["Nitrogen"] = float(n2_fraction)
+    s.ComponentMolarFraction.SetValues(tuple(x.get(c, 0.0) for c in s.FluidPackage.Components.Names), "")
+    write(s.MolarFlow, (total, "kgmole/h"))
+
+
 def cache_objects(case, *, segments: int) -> dict:
     """
     Look up streams, unit operations and cells used by `run_point` once per
@@ -75,6 +99,7 @@ def cache_objects(case, *, segments: int) -> dict:
         "solver": case.Solver,
         "units": case.Application.UnitConversionSetManager,
         "co2in": streams("co2_1atm"),
+        "co2_nominal": feed_nominal(streams("co2_1atm")),   # for `set_inert`
         "h2in": streams("h2"),
         "rin": streams("RinV"),                     # reactor inlet
         "rout": streams("RoutV"),                   # reactor outlet
@@ -95,7 +120,7 @@ def cache_objects(case, *, segments: int) -> dict:
 
 
 def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate,
-              warm: dict | None = None, timeout: float = 120.0) -> dict:
+              n2_fraction: float | None = None, warm: dict | None = None, timeout: float = 120.0) -> dict:
     """
     Set the operating point, solve, and return one flat result row.
 
@@ -103,10 +128,11 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
     converges on its own, applies the inputs, solves, restores the column and
     flare, solves again.  Filter rows on ``converged`` before trusting them.
 
-    `warm` is a `tear_state` (the row key of the same name) to start the
-    recycle from; without it the recycle starts from whatever the previous
-    solve left in VAPToMixer.  The row records the converged state as
-    ``tear_state``.
+    `n2_fraction` is the N2 mole fraction of the CO2 feed (`set_inert`); None
+    restores the case's nominal value.  `warm` is a `tear_state` (the row key
+    of the same name) to start the recycle from; without it the recycle starts
+    from whatever the previous solve left in VAPToMixer.  The row records the
+    converged state as ``tear_state``.
     """
     o = objects
     solver = o["solver"]
@@ -121,6 +147,7 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
     write(o["reactor"].TotalVolume, volume)
     o["ratio_cell"].CellValue = float(ratio)
     o["split"].SplitsValue = (float(purge_rate), 1.0 - float(purge_rate))
+    set_inert(o, o["co2_nominal"]["n2_fraction"] if n2_fraction is None else n2_fraction)
     if warm is not None:
         write_tear_state(o, warm)
     solve(solver, timeout)
@@ -142,11 +169,14 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
         "volume_m3": read(reactor.TotalVolume, "m3"),
         "ratio": float(ratio),
         "purge_rate": float(purge_rate),
+        "n2_fraction": by_component(co2in, "ComponentMolarFraction", "")["Nitrogen"],
         "methanol_kg_h": read(meoh.MassFlow, "kg/h"),
         "hydrogen_purge_kg_h": purge_kg_h["Hydrogen"],
         "co2_purge_kg_h": purge_kg_h["CO2"],
         "co2_input_kg_h": read(co2in.MassFlow, "kg/h"),
         "h2_input_kg_h": read(h2in.MassFlow, "kg/h"),
+        "h2_utilisation": 1 - purge_kg_h["Hydrogen"] / by_component(h2in, "ComponentMassFlow", "kg/h")["Hydrogen"],
+                                                    # fresh H2 (component, not the stream: 8 % of its mass is water) not lost to the purge
         **{f"in_{c}_kgmole_h": v for c, v in inlet.items()},       # reactor inlet, per component
         "reactor_duty_kW": read(reactor.HeatFlow, "kW"),
         "reactor_dP_bar": read(reactor.PressureDrop, "bar"),
