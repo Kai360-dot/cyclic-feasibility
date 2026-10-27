@@ -24,7 +24,7 @@ from scipy.stats import qmc
 
 __all__ = ["Trellis", "Corner", "generate_sobol_points", "NestedSampler", "Result", "PointSet", "Stats",
            "Surrogate", "fit_mlp", "cross_validate", "select_width", "train_surrogate", "parity_plot",
-           "hausdorff"]
+           "hausdorff", "set_metrics"]
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +302,10 @@ class NestedSampler:
     are <= 0; an exception or a NaN marks the evaluation as failed (the point is dropped and
     counted in `stats.failures`). Only their maximum enters the DAG, which is the criterion
     NSFeas forms from the separate constraints anyway (checked point for point).
+    With `scenarios` (ns x np, equal weights) the function is `constraints(x, p)`, called once per
+    scenario row `p`, and a point is feasible iff the `criterion` ("var" or "cvar") of its maximal
+    constraint value over the scenarios, at the violation probability `threshold`, is <= 0
+    (MAGNUS set_parameter, FEASCRIT, FEASTHRES).
     Options and their MAGNUS names: `num_live` NUMLIVE, `num_prop` NUMPROP, `ell_mag` ELLMAG,
     `ell_red` ELLRED, `max_iter` MAXITER, `max_err` MAXERR (initialisation only), `max_time`
     MAXCPU [s], `display` DISPLEVEL, `display_iter` DISPITER; 0 is no limit. There is no seed:
@@ -310,21 +314,29 @@ class NestedSampler:
     a kernel interrupt is swallowed with the other exceptions: restart the kernel.
     """
 
-    def __init__(self, constraints, lb, ub, *, num_live=256, num_prop=16, ell_mag=0.30, ell_red=0.20,
+    def __init__(self, constraints, lb, ub, *, scenarios=None, criterion="var", threshold=0.1,
+                 num_live=256, num_prop=16, ell_mag=0.30, ell_red=0.20,
                  max_iter=0, max_err=0, max_time=0.0, display=1, display_iter=25):
         self.constraints = constraints
         self.lb, self.ub = np.array(lb, dtype=float).ravel(), np.array(ub, dtype=float).ravel()
         if self.lb.size == 0 or self.lb.shape != self.ub.shape or not np.all(self.lb < self.ub):
             raise ValueError("lb must be strictly below ub in every dimension")
+        self.scenarios = None if scenarios is None else np.array(scenarios, dtype=float).reshape(len(scenarios), -1)
+        if criterion not in ("var", "cvar"):
+            raise ValueError("criterion must be 'var' or 'cvar'")
+        self.criterion, self.threshold = criterion, float(threshold)
         self.options = dict(NUMLIVE=int(num_live), NUMPROP=int(num_prop), ELLMAG=float(ell_mag),
                             ELLRED=float(ell_red), MAXITER=int(max_iter), MAXERR=int(max_err),
                             MAXCPU=float(max_time), DISPLEVEL=int(display), DISPITER=int(display_iter),
                             MAXTHREAD=1)                            # a Python callback needs the GIL
 
-    def _max_constraint(self, x):
-        g = np.asarray(self.constraints(np.asarray(x, dtype=float)), dtype=float).ravel()
+    def _max_constraint(self, v):
+        v = np.asarray(v, dtype=float)                                  # controls, then parameters
+        nx = self.lb.size
+        g = self.constraints(v) if self.scenarios is None else self.constraints(v[:nx], v[nx:])
+        g = np.asarray(g, dtype=float).ravel()
         if g.size == 0 or np.isnan(g).any():
-            raise ValueError(f"constraints returned {g} at {x}")
+            raise ValueError(f"constraints returned {g} at {v}")
         return [float(g.max())]
 
     def sample(self):
@@ -334,14 +346,19 @@ class NestedSampler:
         dag = pymc.FFGraph()
         dag.options.MAXTHREAD = 1
         x = [dag.add_var(f"x{i}") for i in range(self.lb.size)]
+        p = [] if self.scenarios is None else [dag.add_var(f"p{j}") for j in range(self.scenarios.shape[1])]
         op = pymc.FFCustom()
         op.set_D_eval(self._max_constraint)
         ns = NSFeas()
         for name, value in self.options.items():
             setattr(ns.options, name, value)
+        ns.options.FEASCRIT = {"var": NSFeas.Options.TYPE.VAR, "cvar": NSFeas.Options.TYPE.CVAR}[self.criterion]
+        ns.options.FEASTHRES = self.threshold
         ns.set_dag(dag)
         ns.set_control(x, self.lb.tolist(), self.ub.tolist())
-        ns.set_constraint(op(var=x, uid=0))
+        if p:
+            ns.set_parameter(p, self.scenarios.tolist())
+        ns.set_constraint(op(var=x + p, uid=0))
         if not ns.setup():
             raise RuntimeError("NSFeas.setup failed")
         t0 = time.time()
@@ -528,6 +545,26 @@ def parity_plot(Y, Y_pred, names=None, *, ncols=3, **kwargs):
     fig.supylabel("predicted")
     return fig, axes
 
+
+
+def set_metrics(A, B, bounds, eps=None):
+    """
+    Compare two point sets in the box `bounds` (2 x d: lower row, upper row), e.g. a reconstructed feasible
+    set A against the simultaneous one B, in box-normalised coordinates: the Hausdorff distance, the
+    1-Wasserstein distance (uniform weights, any sizes), and the precision b / (a + b) and recall b / (b + c)
+    of A with respect to B, where a point counts as covered when the other set has a point within `eps`,
+    by default the median nearest-neighbour spacing of B.  Returns a dict.
+    """
+    from scipy.spatial.distance import cdist
+    from scipy.stats import wasserstein_distance_nd
+    lo, span = np.asarray(bounds, float)[0], np.ptp(np.asarray(bounds, float), axis=0)
+    A, B = (np.asarray(A, float) - lo) / span, (np.asarray(B, float) - lo) / span
+    D = cdist(A, B)                                          # D[i, j]: distance between A[i] and B[j]
+    if eps is None:
+        DB = cdist(B, B); np.fill_diagonal(DB, np.inf); eps = float(np.median(DB.min(1)))
+    return {"hausdorff": float(max(D.min(1).max(), D.min(0).max())), "wasserstein": float(wasserstein_distance_nd(A, B)),
+            "precision": float((D.min(1) <= eps).mean()), "recall": float((D.min(0) <= eps).mean()), "eps": eps,
+            "n_A": len(A), "n_B": len(B)}
 
 def eucl_dist(x, y):
     """Compute the euclidian distance"""
