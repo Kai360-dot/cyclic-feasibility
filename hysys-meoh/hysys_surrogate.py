@@ -32,6 +32,7 @@ from datetime import datetime
 import numpy as np
 
 from hysys import read, write, by_component, to_internal, convert, solve
+from hysys_loop import feed_nominal, set_inert
 
 __all__ = ["cache_objects", "predict", "write_outlet", "reactor_step", "wegstein", "is_converged", "run_point",
            "stoi_as_raw", "INPUTS", "COMPONENTS", "STOICH", "WEGSTEIN_Q", "WEGSTEIN_COUNT"]
@@ -71,6 +72,7 @@ def cache_objects(case, box: dict) -> dict:
         "solver": case.Solver,
         "units": case.Application.UnitConversionSetManager,
         "co2in": streams("co2_1atm"),
+        "co2_nominal": feed_nominal(streams("co2_1atm")),   # for `set_inert`
         "h2in": streams("h2"),
         "rin": rin,
         "rout": streams("RoutV"),
@@ -147,15 +149,17 @@ def is_converged(new, old, tol: float = 1e-3) -> bool:
     return float((np.abs(new - old) / (np.abs(new) + 1e-8)).max()) < tol
 
 
-def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate, warm: dict | None = None,
-              accelerate: bool = True, tol: float = 1e-3, max_passes: int = 100, timeout: float = 120.0) -> dict:
+def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate, n2_fraction: float | None = None,
+              warm: dict | None = None, accelerate: bool = True, tol: float = 1e-3, max_passes: int = 100,
+              timeout: float = 120.0) -> dict:
     """
     Set the operating point, iterate the tear until `is_converged`, and return
     the same result row as ``hysys_methanol.run_point`` with the reactor
     quantities taken from the net, plus `tear_passes`, `tear_converged` and
     `outside_box` from the last pass.  No volume: the net was trained at one.
 
-    `warm` is a ``tear_state`` of an earlier row: the reactor outlet (kgmole/h)
+    `n2_fraction` is the N2 mole fraction of the CO2 feed (``hysys_loop.set_inert``),
+    None the case's nominal value.  `warm` is a ``tear_state`` of an earlier row: the reactor outlet (kgmole/h)
     and pressure drop (bar) to write into RoutV before the first pass; without
     it RoutV holds whatever the previous point left.  The row records its own
     converged ``tear_state``.
@@ -178,6 +182,7 @@ def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate, w
     write(o["rout"].Temperature, temperature)       # isothermal reactor, as in the original case
     o["ratio_cell"].CellValue = float(ratio)
     o["split"].SplitsValue = (float(purge_rate), 1.0 - float(purge_rate))
+    set_inert(o, o["co2_nominal"]["n2_fraction"] if n2_fraction is None else n2_fraction)
     if warm is not None:
         rout = o["rout"]
         rout.ComponentMolarFlow.SetValues(tuple(float(warm["outlet_kgmole_h"].get(c, 0.0)) for c in o["components"]), "kgmole/h")
@@ -215,11 +220,14 @@ def run_point(objects: dict, net, *, pressure, temperature, ratio, purge_rate, w
         "temperature_C": read(o["rin"].Temperature, "C"),
         "ratio": float(ratio),
         "purge_rate": float(purge_rate),
+        "n2_fraction": by_component(co2in, "ComponentMolarFraction", "")["Nitrogen"],
         "methanol_kg_h": read(meoh.MassFlow, "kg/h"),
         "hydrogen_purge_kg_h": purge_kg_h["Hydrogen"],
         "co2_purge_kg_h": purge_kg_h["CO2"],
         "co2_input_kg_h": read(co2in.MassFlow, "kg/h"),
         "h2_input_kg_h": read(h2in.MassFlow, "kg/h"),
+        "h2_utilisation": 1 - purge_kg_h["Hydrogen"] / by_component(h2in, "ComponentMassFlow", "kg/h")["Hydrogen"],
+                                                    # fresh H2 (component, not the stream: 8 % of its mass is water) not lost to the purge
         "reactor_duty_kW": step["duty_kW"],
         "reactor_dP_bar": step["dP_bar"],
         "co_formation_kgmole_h": step["co_formation_kgmole_h"],
