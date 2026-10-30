@@ -12,12 +12,14 @@ dependencies = [
     "pyarrow>=25.0.1",
     "pywin32>=312",
     "scipy>=1.18.1",
+    "sundials4py>=7.9.0",
     "torch>=2.14.0",
 ]
 
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
+    "nbconvert>=7.17.2",
 ]
 
 [tool.uv.sources]
@@ -28,4 +30,4 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["helpers", "hysys"]
+py-modules = ["helpers", "hysys", "plotstyle"]
